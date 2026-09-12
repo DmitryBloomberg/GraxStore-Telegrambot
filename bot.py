@@ -54,31 +54,11 @@ SETTINGS_PATH = DATA_DIR / "settings.json"
 ENV_PATH = BASE_DIR / ".env"
 
 ORDER_STATUSES = (
-    "Оформлено",
-    "Ожидает отправки в Россию",
-    "Доставка на склад",
+    "Оформлен",
+    "Покупка",
+    "Отправлено в Россию",
     "Готово к выдаче",
     "Выдано",
-)
-ORDER_FROZEN_STATUS = "Заморозка"
-LEGACY_ORDER_STATUS_MAP = {
-    "Оформлен": "Оформлено",
-    "Покупка": "Ожидает отправки в Россию",
-    "Отправлено в Россию": "Доставка на склад",
-}
-STORE_CLOSED_MESSAGE = (
-    "В данный момент магазин закрыт, следите за открытием в нашем телеграмм канале "
-    "https://t.me/grax78"
-)
-PARTNER_AD_TEXT = (
-    "Реклама партнера @ButovskyLive:\n\n"
-    "Не работает VPN? Надоели постоянные блокировки?\n\n"
-    "Присоединяетсь к Butobsky\n"
-    "⭐ - Дешевые цены\n"
-    "🛡️ - Полная конфенденциальность\n"
-    "💫 - Поддержка 24/7\n\n"
-    "Канал: @ButovskyLive\n"
-    "По всем вопросам: @butovskysup"
 )
 PAYMENT_STATUS_LABELS = {
     "awaiting_receipt": "Ожидается чек об оплате",
@@ -256,11 +236,6 @@ def money(value: float | int) -> str:
     return f"{float(value):,.0f}".replace(",", " ") + " ₽"
 
 
-def canonical_order_status(status: Any) -> str:
-    value = str(status or ORDER_STATUSES[0])
-    return LEGACY_ORDER_STATUS_MAP.get(value, value)
-
-
 def usd(value: float | int) -> str:
     return f"${float(value):,.2f}"
 
@@ -315,89 +290,29 @@ def admin_keyboard() -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [
-                InlineKeyboardButton(text="Активные заказы", callback_data="admin_orders"),
+                InlineKeyboardButton(text="Заказы", callback_data="admin_orders"),
+                InlineKeyboardButton(text="Статистика", callback_data="admin_stats"),
             ],
+            [InlineKeyboardButton(text="Проверить оплаты", callback_data="admin_payments")],
             [
-                InlineKeyboardButton(text="Пользователи ZIP", callback_data="admin_export"),
-                InlineKeyboardButton(text="Внести пользователей ZIP", callback_data="admin_import"),
+                InlineKeyboardButton(text="Пользователи", callback_data="admin_users"),
+                InlineKeyboardButton(text="Сменить доставку", callback_data="admin_delivery"),
             ],
-            [
-                InlineKeyboardButton(
-                    text="Изменить цену доставки", callback_data="admin_delivery"
-                ),
-            ],
+            [InlineKeyboardButton(text="Реквизиты оплаты", callback_data="admin_payment_settings")],
             [
                 InlineKeyboardButton(
                     text="Закрыть магазин" if store_is_open else "Открыть магазин",
                     callback_data="admin_toggle",
                 ),
+                InlineKeyboardButton(text="Обновить товары", callback_data="admin_refresh"),
             ],
             [
-                InlineKeyboardButton(
-                    text="Переустановить позиции товаров",
-                    callback_data="admin_refresh",
-                ),
-            ],
-            [
-                InlineKeyboardButton(text="Проверить оплаты", callback_data="admin_payments"),
-                InlineKeyboardButton(text="Статистика", callback_data="admin_stats"),
-            ],
-            [
-                InlineKeyboardButton(text="Пользователи", callback_data="admin_users"),
-                InlineKeyboardButton(
-                    text="Реквизиты оплаты", callback_data="admin_payment_settings"
-                ),
+                InlineKeyboardButton(text="Скачать пользователей", callback_data="admin_export"),
+                InlineKeyboardButton(text="Загрузить пользователей", callback_data="admin_import"),
             ],
             [InlineKeyboardButton(text="Удалить заказ", callback_data="admin_delete")],
         ]
     )
-
-
-def admin_order_keyboard(order: dict[str, Any]) -> InlineKeyboardMarkup:
-    """Controls shown under every order in the administrator's order list."""
-    order_id = str(order["id"])
-    user_id = str(order.get("user_id", ""))
-    frozen = order.get("status") == ORDER_FROZEN_STATUS
-    return InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(text="Написать", url=f"tg://user?id={user_id}"),
-                InlineKeyboardButton(
-                    text="Изменить этап",
-                    callback_data=f"admin_stage:{order_id}",
-                ),
-            ],
-            [
-                InlineKeyboardButton(
-                    text="Откатить этап",
-                    callback_data=f"admin_rollback:{order_id}",
-                ),
-                InlineKeyboardButton(
-                    text="Разморозить" if frozen else "Заморозить",
-                    callback_data=f"admin_freeze:{order_id}",
-                ),
-            ],
-        ]
-    )
-
-
-def admin_stage_keyboard(order_id: str, frozen: bool = False) -> InlineKeyboardMarkup:
-    statuses = ORDER_STATUSES[:1] if frozen else ORDER_STATUSES
-    rows: list[list[InlineKeyboardButton]] = []
-    row: list[InlineKeyboardButton] = []
-    for index, status in enumerate(statuses):
-        row.append(
-            InlineKeyboardButton(
-                text=status,
-                callback_data=f"admin_stage_set:{order_id}:{index}",
-            )
-        )
-        if len(row) == 2:
-            rows.append(row)
-            row = []
-    if row:
-        rows.append(row)
-    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def payment_review_keyboard(order_id: str) -> InlineKeyboardMarkup:
@@ -497,9 +412,6 @@ def catalog_pagination_keyboard(
 async def show_products(
     bot: Bot, chat_id: int, offset: int = 0, budget: int | None = None
 ) -> None:
-    if not settings().get("store_open", True):
-        await bot.send_message(chat_id, STORE_CLOSED_MESSAGE)
-        return
     all_products = load_products()
     products = (
         [
@@ -950,10 +862,6 @@ async def deny_if_unavailable(message: Message) -> bool:
 async def command_start(message: Message) -> None:
     if await deny_if_unavailable(message):
         return
-    await message.answer(PARTNER_AD_TEXT)
-    if is_admin(message.from_user.id):
-        await message.answer("Панель администратора", reply_markup=admin_keyboard())
-        return
     await message.answer(
         f"Здравствуйте, {html.escape(message.from_user.first_name or 'гость')}!\n"
         "Добро пожаловать в GraxStore.",
@@ -982,10 +890,6 @@ async def command_products(message: Message) -> None:
 async def budget_start(callback: CallbackQuery, state: FSMContext) -> None:
     if is_blocked(callback.from_user.id):
         await callback.answer("Ваш аккаунт заблокирован", show_alert=True)
-        return
-    if not settings().get("store_open", True):
-        await callback.message.answer(STORE_CLOSED_MESSAGE)
-        await callback.answer()
         return
     await state.set_state(UserStates.max_budget)
     await callback.message.answer(
@@ -1042,7 +946,6 @@ async def budget_page(callback: CallbackQuery) -> None:
 async def command_orders(message: Message) -> None:
     if await deny_if_unavailable(message):
         return
-    await message.answer(PARTNER_AD_TEXT)
     orders = [
         load_order(path.name)
         for path in order_files()
@@ -1056,7 +959,7 @@ async def command_orders(message: Message) -> None:
     for order in reversed(own):
         payment_status = order.get("payment_status", "approved")
         lines.append(
-            f"№{order['id']} — {html.escape(canonical_order_status(order.get('status')))}\n"
+            f"№{order['id']} — {html.escape(order.get('status', ORDER_STATUSES[0]))}\n"
             f"Оплата: {html.escape(PAYMENT_STATUS_LABELS.get(payment_status, payment_status))}\n"
             f"{money(order.get('total_rub', 0))}\n"
             + "\n".join(f"• {html.escape(item['name'])}" for item in order.get("items", []))
@@ -1069,9 +972,6 @@ async def callback_products(callback: CallbackQuery) -> None:
     await callback.answer()
     if is_blocked(callback.from_user.id):
         await callback.message.answer("Ваш аккаунт заблокирован.")
-        return
-    if not settings().get("store_open", True):
-        await callback.message.answer(STORE_CLOSED_MESSAGE)
         return
     await show_products(callback.bot, callback.message.chat.id)
 
@@ -1105,7 +1005,6 @@ async def callback_cart_add(callback: CallbackQuery) -> None:
         cart.append(product_id)
         user["cart"] = cart
         save_user(user)
-        await callback.message.answer(PARTNER_AD_TEXT)
     await callback.answer("Товар добавлен в корзину")
 
 
@@ -1285,13 +1184,22 @@ async def admin_orders(callback: CallbackQuery) -> None:
             f"<b>Заказ №{order['id']}</b>\n"
             f"Пользователь: <code>{order.get('user_id')}</code>\n"
             f"Сумма: {money(order.get('total_rub', 0))}\n"
-            f"Статус: {html.escape(canonical_order_status(order.get('status')))}\n"
+            f"Статус: {html.escape(order.get('status', ORDER_STATUSES[0]))}\n"
             f"Оплата: {html.escape(PAYMENT_STATUS_LABELS.get(order.get('payment_status', 'approved'), order.get('payment_status', '')))}\n"
             + "\n".join(f"• {html.escape(item['name'])}" for item in order.get("items", []))
         )
+        buttons = [
+            [
+                InlineKeyboardButton(
+                    text=status,
+                    callback_data=f"admin_status:{order['id']}:{index}",
+                )
+                for index, status in enumerate(ORDER_STATUSES)
+            ]
+        ]
         await callback.message.answer(
             text,
-            reply_markup=admin_order_keyboard(order),
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
         )
     await callback.answer()
 
@@ -1355,30 +1263,8 @@ async def payment_decision(callback: CallbackQuery) -> None:
         log.warning("Could not notify user %s about payment", order.get("user_id"))
 
 
-@dp.callback_query(F.data.startswith("admin_stage:"))
-async def admin_stage(callback: CallbackQuery) -> None:
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Нет доступа", show_alert=True)
-        return
-    order_id = callback.data.split(":", 1)[1]
-    order = load_order(order_id)
-    if not order:
-        await callback.answer("Заказ не найден", show_alert=True)
-        return
-    frozen = order.get("status") == ORDER_FROZEN_STATUS
-    await callback.message.answer(
-        (
-            "Заказ заморожен. После изменения этап начнётся с «Оформлено»."
-            if frozen
-            else "Выберите новый этап заказа:"
-        ),
-        reply_markup=admin_stage_keyboard(order_id, frozen=frozen),
-    )
-    await callback.answer()
-
-
-@dp.callback_query(F.data.startswith("admin_stage_set:"))
-async def admin_stage_set(callback: CallbackQuery) -> None:
+@dp.callback_query(F.data.startswith("admin_status:"))
+async def admin_status(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
@@ -1390,63 +1276,10 @@ async def admin_stage_set(callback: CallbackQuery) -> None:
     if not order:
         await callback.answer("Заказ не найден", show_alert=True)
         return
-    # A frozen order always resumes from the first stage.
-    selected_index = 0 if order.get("status") == ORDER_FROZEN_STATUS else int(index)
-    order["status"] = ORDER_STATUSES[selected_index]
+    order["status"] = ORDER_STATUSES[int(index)]
     order["updated_at"] = now_iso()
     write_json(ORDERS_DIR / order_id / "order.json", order)
     await callback.answer(f"Статус: {order['status']}")
-
-
-@dp.callback_query(F.data.startswith("admin_rollback:"))
-async def admin_rollback(callback: CallbackQuery) -> None:
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Нет доступа", show_alert=True)
-        return
-    order_id = callback.data.split(":", 1)[1]
-    order = load_order(order_id)
-    if not order:
-        await callback.answer("Заказ не найден", show_alert=True)
-        return
-    if order.get("status") == ORDER_FROZEN_STATUS:
-        await callback.answer(
-            "Замороженный заказ сначала нужно изменить — он начнётся с «Оформлено».",
-            show_alert=True,
-        )
-        return
-    try:
-        current_index = ORDER_STATUSES.index(
-            canonical_order_status(order.get("status"))
-        )
-    except ValueError:
-        current_index = 0
-    previous_index = max(0, current_index - 1)
-    order["status"] = ORDER_STATUSES[previous_index]
-    order["updated_at"] = now_iso()
-    write_json(ORDERS_DIR / order_id / "order.json", order)
-    await callback.answer(f"Статус: {order['status']}")
-
-
-@dp.callback_query(F.data.startswith("admin_freeze:"))
-async def admin_freeze(callback: CallbackQuery) -> None:
-    if not is_admin(callback.from_user.id):
-        await callback.answer("Нет доступа", show_alert=True)
-        return
-    order_id = callback.data.split(":", 1)[1]
-    order = load_order(order_id)
-    if not order:
-        await callback.answer("Заказ не найден", show_alert=True)
-        return
-    if order.get("status") == ORDER_FROZEN_STATUS:
-        order["status"] = ORDER_STATUSES[0]
-        answer = "Заказ разморожен и возвращён на этап «Оформлено»"
-    else:
-        order["status"] = ORDER_FROZEN_STATUS
-        answer = "Заказ заморожен"
-    order["updated_at"] = now_iso()
-    write_json(ORDERS_DIR / order_id / "order.json", order)
-    await callback.message.edit_reply_markup(reply_markup=admin_order_keyboard(order))
-    await callback.answer(answer)
 
 
 @dp.callback_query(F.data == "admin_stats")
@@ -1489,7 +1322,7 @@ async def admin_delivery(callback: CallbackQuery, state: FSMContext) -> None:
     await state.set_state(AdminStates.delivery)
     await callback.message.answer(
         f"Текущая доставка: {money(settings().get('delivery_fee_rub', 0))}.\n"
-        "На какую сумму увеличить доставку? Отправьте прибавку в рублях:"
+        "Отправьте новую стоимость доставки в рублях:"
     )
     await callback.answer()
 
@@ -1622,19 +1455,14 @@ async def admin_refresh(callback: CallbackQuery) -> None:
     if not is_admin(callback.from_user.id):
         await callback.answer("Нет доступа", show_alert=True)
         return
-    await callback.answer("Переустановка позиций запущена")
-    await callback.message.answer(
-        "Удаляю старые позиции и заново загружаю каталог Supreme. "
-        "Это может занять несколько минут…"
-    )
+    await callback.answer("Обновление каталога запущено")
+    await callback.message.answer("Загружаю каталог Supreme, это может занять несколько минут…")
     try:
         count = await sync_products_with_session()
-        await callback.message.answer(f"Позиции переустановлены: {count} шт.")
+        await callback.message.answer(f"Каталог обновлён: {count} позиций.")
     except Exception:
         log.exception("Manual product sync failed")
-        await callback.message.answer(
-            "Не удалось переустановить каталог. Старые позиции сохранены."
-        )
+        await callback.message.answer("Не удалось обновить каталог. Старые позиции сохранены.")
 
 
 @dp.message(AdminStates.delivery)
@@ -1642,19 +1470,16 @@ async def receive_delivery(message: Message, state: FSMContext) -> None:
     if not is_admin(message.from_user.id):
         return
     value = parse_price(message.text or "")
-    if value is None or value <= 0:
-        await message.answer("Введите положительную сумму, например: 3500")
+    if value is None:
+        await message.answer("Введите число, например: 3500")
         return
     current = settings()
-    old_delivery = float(current.get("delivery_fee_rub", 0))
-    new_delivery = old_delivery + value
-    current["delivery_fee_rub"] = round(new_delivery)
+    current["delivery_fee_rub"] = round(value)
     write_json(SETTINGS_PATH, current)
-    changed = reprice_catalog(new_delivery)
+    changed = reprice_catalog(value)
     await state.clear()
     await message.answer(
-        f"Доставка увеличена на {money(value)}.\n"
-        f"Новая стоимость доставки: {money(new_delivery)}.\n"
+        f"Новая доставка: {money(value)}.\n"
         f"Пересчитано позиций в каталоге: {changed}. "
         "Уже оформленные заказы не изменены."
     )

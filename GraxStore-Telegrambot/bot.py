@@ -70,6 +70,16 @@ STORE_CLOSED_MESSAGE = (
     "В данный момент магазин закрыт, следите за открытием в нашем телеграмм канале "
     "https://t.me/grax78"
 )
+PARTNER_AD_TEXT = (
+    "Реклама партнера @ButovskyLive:\n\n"
+    "Не работает VPN? Надоели постоянные блокировки?\n\n"
+    "Присоединяетсь к Butobsky\n"
+    "⭐ - Дешевые цены\n"
+    "🛡️ - Полная конфенденциальность\n"
+    "💫 - Поддержка 24/7\n\n"
+    "Канал: @ButovskyLive\n"
+    "По всем вопросам: @butovskysup"
+)
 PAYMENT_STATUS_LABELS = {
     "awaiting_receipt": "Ожидается чек об оплате",
     "receipt_uploaded": "Чек на проверке",
@@ -940,6 +950,7 @@ async def deny_if_unavailable(message: Message) -> bool:
 async def command_start(message: Message) -> None:
     if await deny_if_unavailable(message):
         return
+    await message.answer(PARTNER_AD_TEXT)
     if is_admin(message.from_user.id):
         await message.answer("Панель администратора", reply_markup=admin_keyboard())
         return
@@ -1031,6 +1042,7 @@ async def budget_page(callback: CallbackQuery) -> None:
 async def command_orders(message: Message) -> None:
     if await deny_if_unavailable(message):
         return
+    await message.answer(PARTNER_AD_TEXT)
     orders = [
         load_order(path.name)
         for path in order_files()
@@ -1093,6 +1105,7 @@ async def callback_cart_add(callback: CallbackQuery) -> None:
         cart.append(product_id)
         user["cart"] = cart
         save_user(user)
+        await callback.message.answer(PARTNER_AD_TEXT)
     await callback.answer("Товар добавлен в корзину")
 
 

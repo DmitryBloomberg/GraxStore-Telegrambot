@@ -120,10 +120,53 @@ log = logging.getLogger("graxstore")
 
 BOT_TOKEN = os.getenv("BOT_TOKEN", "").strip()
 SUPREME_URL = os.getenv("SUPREME_URL", "https://supreme.com/").strip()
+NIKE_URL = os.getenv(
+    "NIKE_URL",
+    "https://www.nike.com/w/mens-lifestyle-shoes-13jrmznik1zy7ok",
+).strip()
+ZARA_URL = os.getenv(
+    "ZARA_URL",
+    "https://www.zara.com/us/en/man-new-in-l711.html?v1=2732942",
+).strip()
 ADMIN_IDS = {
     int(value)
     for value in os.getenv("ADMIN_IDS", "").replace(";", ",").split(",")
     if value.strip().lstrip("-").isdigit()
+}
+
+CATEGORY_LABELS = {
+    "shoes": "Обувь",
+    "pants": "Штаны",
+    "accessories": "Аксессуары",
+    "jackets": "Куртки и верхняя одежда",
+    "tops": "Кофты и верх",
+    "shorts": "Шорты",
+    "other": "Другое",
+}
+CATEGORY_ALIASES = {
+    "shoes": (
+        "shoe", "sneaker", "footwear", "boot", "обув", "кроссов", "ботин",
+        "кед", "сандал",
+    ),
+    "pants": (
+        "pant", "trouser", "jean", "jogger", "legging", "брюк", "штаны",
+        "джинс", "леггин",
+    ),
+    "accessories": (
+        "accessor", "bag", "backpack", "cap", "hat", "belt", "wallet",
+        "sunglass", "sock", "аксессуар", "сумк", "рюкзак", "кепк", "шапк",
+        "ремн", "кошел", "очк",
+    ),
+    "jackets": (
+        "jacket", "coat", "parka", "outerwear", "windrunner", "куртк",
+        "пальто", "верхн", "парка", "ветров",
+    ),
+    "tops": (
+        "hoodie", "sweatshirt", "sweater", "fleece", "shirt", "t-shirt",
+        "tee", "top", "кофт", "свитшот", "толстов", "футбол", "рубаш",
+        "джемпер", "свитер",
+    ),
+    "shorts": ("short", "шорт"),
 }
 
 
@@ -226,6 +269,44 @@ def load_products() -> list[dict[str, Any]]:
     return products
 
 
+def normalize_category(value: Any) -> str:
+    """Map a source category or product title to one shop filter."""
+    text = str(value or "").strip().lower()
+    for category, aliases in CATEGORY_ALIASES.items():
+        if any(alias in text for alias in aliases):
+            return category
+    return "other"
+
+
+def product_category(product: dict[str, Any]) -> str:
+    category = product.get("category")
+    if category in CATEGORY_LABELS:
+        return str(category)
+    return normalize_category(
+        " ".join(
+            str(product.get(key, ""))
+            for key in ("name", "category_name", "product_type", "subtitle")
+        )
+    )
+
+
+def product_brand(product: dict[str, Any]) -> str:
+    return str(product.get("brand") or "Без бренда").strip() or "Без бренда"
+
+
+def filter_key(value: str) -> str:
+    key = re.sub(r"[^a-z0-9а-яё]+", "-", value.lower()).strip("-")
+    return key[:24] or "other"
+
+
+def brand_by_key(products: list[dict[str, Any]], key: str) -> str | None:
+    for product in products:
+        brand = product_brand(product)
+        if filter_key(brand) == key:
+            return brand
+    return None
+
+
 def reprice_catalog(delivery_fee_rub: float) -> int:
     """Apply a new delivery fee to products that have not been ordered yet.
 
@@ -266,8 +347,11 @@ def usd(value: float | int) -> str:
 
 
 def product_caption(product: dict[str, Any]) -> str:
+    brand = html.escape(product_brand(product))
+    category = html.escape(CATEGORY_LABELS.get(product_category(product), "Другое"))
     return (
         f"<b>{html.escape(str(product.get('name', 'Товар')))}</b>\n"
+        f"Бренд: <b>{brand}</b> · Категория: <b>{category}</b>\n"
         f"Цена в магазине: <b>{usd(product.get('price_usd', 0))}</b>\n"
         f"Цена в рублях: <b>{money(product.get('price_rub', 0))}</b>\n"
         f"Итого с доставкой: <b>{money(product.get('price_with_delivery_rub', 0))}</b>"
@@ -306,6 +390,76 @@ def profile_keyboard() -> InlineKeyboardMarkup:
             [InlineKeyboardButton(text="Товары", callback_data="show_products")],
             [InlineKeyboardButton(text="Максимальный бюджет", callback_data="budget_start")],
             [InlineKeyboardButton(text="Корзина", callback_data="show_cart")],
+        ]
+    )
+
+
+def catalog_filter_keyboard() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [
+                InlineKeyboardButton(
+                    text="По категории",
+                    callback_data="catalog_categories",
+                ),
+                InlineKeyboardButton(text="По бренду", callback_data="catalog_brands"),
+            ],
+            [InlineKeyboardButton(text="Все товары", callback_data="catalog_all")],
+        ]
+    )
+
+
+def category_keyboard() -> InlineKeyboardMarkup:
+    products = load_products()
+    available = {
+        product_category(product)
+        for product in products
+        if product_category(product) in CATEGORY_LABELS
+    }
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=CATEGORY_LABELS[key],
+                callback_data=f"catalog_category:{key}",
+            )
+        ]
+        for key in CATEGORY_LABELS
+        if key in available
+    ]
+    rows.append([InlineKeyboardButton(text="Все категории", callback_data="catalog_all")])
+    rows.append([InlineKeyboardButton(text="Назад к фильтрам", callback_data="catalog_filters")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def brand_keyboard() -> InlineKeyboardMarkup:
+    products = load_products()
+    brands: dict[str, str] = {}
+    for product in products:
+        brand = product_brand(product)
+        brands.setdefault(filter_key(brand), brand)
+    rows = [
+        [
+            InlineKeyboardButton(
+                text=brand,
+                callback_data=f"catalog_brand:{key}",
+            )
+        ]
+        for key, brand in sorted(brands.items(), key=lambda item: item[1].lower())
+    ]
+    rows.append([InlineKeyboardButton(text="Все бренды", callback_data="catalog_all")])
+    rows.append([InlineKeyboardButton(text="Назад к фильтрам", callback_data="catalog_filters")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def products_page_callback(
+    offset: int, category: str | None = None, brand: str | None = None
+) -> str:
+    return ":".join(
+        [
+            "products_page",
+            category or "all",
+            filter_key(brand) if brand else "all",
+            str(offset),
         ]
     )
 
@@ -478,15 +632,21 @@ async def send_product(bot: Bot, chat_id: int, product: dict[str, Any]) -> None:
 
 
 def catalog_pagination_keyboard(
-    next_offset: int, total: int, budget: int | None = None
+    next_offset: int,
+    total: int,
+    budget: int | None = None,
+    category: str | None = None,
+    brand: str | None = None,
 ) -> InlineKeyboardMarkup | None:
     if next_offset >= total:
         return None
-    callback_data = (
-        f"budget_page:{budget}:{next_offset}"
-        if budget is not None
-        else f"products_page:{next_offset}"
-    )
+    if budget is not None:
+        callback_data = (
+            f"budget_page:{budget}:{category or 'all'}:"
+            f"{filter_key(brand) if brand else 'all'}:{next_offset}"
+        )
+    else:
+        callback_data = products_page_callback(next_offset, category, brand)
     return InlineKeyboardMarkup(
         inline_keyboard=[
             [InlineKeyboardButton(text="Показать еще", callback_data=callback_data)]
@@ -495,7 +655,12 @@ def catalog_pagination_keyboard(
 
 
 async def show_products(
-    bot: Bot, chat_id: int, offset: int = 0, budget: int | None = None
+    bot: Bot,
+    chat_id: int,
+    offset: int = 0,
+    budget: int | None = None,
+    category: str | None = None,
+    brand: str | None = None,
 ) -> None:
     if not settings().get("store_open", True):
         await bot.send_message(chat_id, STORE_CLOSED_MESSAGE)
@@ -510,29 +675,44 @@ async def show_products(
         if budget is not None
         else all_products
     )
+    if category:
+        products = [product for product in products if product_category(product) == category]
+    if brand:
+        products = [product for product in products if product_brand(product) == brand]
     if not products:
         await bot.send_message(
             chat_id,
             (
-                f"До {money(budget)} подходящих товаров не найдено."
+                f"По выбранным фильтрам до {money(budget)} подходящих товаров не найдено."
                 if budget is not None
-                else "Сейчас товары не загружены. Администратор может обновить каталог."
+                else "По выбранным фильтрам товаров не найдено."
             ),
         )
         return
     page = products[offset : offset + 5]
+    filter_title = []
+    if category:
+        filter_title.append(CATEGORY_LABELS.get(category, category))
+    if brand:
+        filter_title.append(brand)
+    filter_suffix = f" ({', '.join(filter_title)})" if filter_title else ""
     if budget is None:
-        title = f"Товары {offset + 1}–{min(offset + 5, len(products))} из {len(products)}"
+        title = (
+            f"Товары{filter_suffix} "
+            f"{offset + 1}–{min(offset + 5, len(products))} из {len(products)}"
+        )
     else:
         title = (
-            f"Товары до {money(budget)}: "
+            f"Товары{filter_suffix} до {money(budget)}: "
             f"{offset + 1}–{min(offset + 5, len(products))} из {len(products)}"
         )
     await bot.send_message(chat_id, title)
     for product in page:
         await send_product(bot, chat_id, product)
         await asyncio.sleep(0.08)
-    keyboard = catalog_pagination_keyboard(offset + 5, len(products), budget)
+    keyboard = catalog_pagination_keyboard(
+        offset + 5, len(products), budget, category, brand
+    )
     if keyboard:
         await bot.send_message(chat_id, "Показать следующие 5 позиций:", reply_markup=keyboard)
 
@@ -576,12 +756,27 @@ def parse_price(value: Any) -> float | None:
 def normalize_images(images: Any, base_url: str) -> list[str]:
     if isinstance(images, str):
         images = [images]
+    elif isinstance(images, dict):
+        images = (
+            images.get("images")
+            or images.get("urls")
+            or images.get("src")
+            or images.get("url")
+            or images.get("imageUrl")
+        )
+        if isinstance(images, str):
+            images = [images]
     if not isinstance(images, list):
         return []
     result = []
     for image in images:
         if isinstance(image, dict):
-            image = image.get("src") or image.get("url")
+            image = (
+                image.get("src")
+                or image.get("url")
+                or image.get("imageUrl")
+                or image.get("image")
+            )
         if not image:
             continue
         url = urljoin(base_url, str(image).split("?")[0])
@@ -595,30 +790,62 @@ def append_product(
     item: Any,
     base_url: str,
     source_currency: str = "USD",
+    source_brand: str | None = None,
 ) -> None:
     if not isinstance(item, dict):
         return
-    title = item.get("title") or item.get("name") or item.get("product_name")
+    title = (
+        item.get("title")
+        or item.get("name")
+        or item.get("product_name")
+        or item.get("productName")
+    )
+    if isinstance(title, dict):
+        title = title.get("text") or title.get("value")
     if not title:
         return
     offers = item.get("offers", {})
     if isinstance(offers, list):
         offers = offers[0] if offers else {}
+    if not isinstance(offers, dict):
+        offers = {}
+    prices = item.get("prices") if isinstance(item.get("prices"), dict) else {}
     price = (
         item.get("price")
         or item.get("price_usd")
-        or (offers.get("price") if isinstance(offers, dict) else None)
+        or item.get("priceInCents")
+        or item.get("priceInMinorUnits")
+        or item.get("currentPrice")
+        or item.get("priceWithDiscount")
+        or offers.get("price")
+        or prices.get("currentPrice")
+        or prices.get("initialPrice")
         or (item.get("variants", [{}])[0].get("price") if item.get("variants") else None)
     )
+    if isinstance(price, dict):
+        price = price.get("value") or price.get("amount") or price.get("price")
     price_value = parse_price(price)
     if price_value is None:
         return
     # Supreme's current embedded catalog uses integer minor units while the
     # older Shopify endpoint returns strings such as "48.00".
-    if isinstance(price, (int, float)) and abs(float(price)) >= 10000:
+    if (
+        isinstance(price, (int, float))
+        and abs(float(price)) >= 10000
+        and not item.get("priceInCents")
+        and not item.get("priceInMinorUnits")
+    ):
+        price_value /= 100
+    if isinstance(item.get("priceInCents"), (int, float)) or isinstance(
+        item.get("priceInMinorUnits"), (int, float)
+    ):
         price_value /= 100
     images = normalize_images(
-        item.get("images") or item.get("image") or item.get("image_url"),
+        item.get("images")
+        or item.get("image")
+        or item.get("image_url")
+        or item.get("media")
+        or item.get("colorVariants"),
         base_url,
     )
     handle = item.get("handle")
@@ -626,6 +853,19 @@ def append_product(
     if not url and handle:
         url = urljoin(base_url, f"/products/{handle}")
     url = urljoin(base_url, str(url or ""))
+    category_value = (
+        item.get("category")
+        or item.get("categoryName")
+        or item.get("family")
+        or item.get("sectionName")
+        or item.get("productType")
+        or item.get("productSubType")
+        or title
+    )
+    raw_brand = item.get("brand")
+    if isinstance(raw_brand, dict):
+        raw_brand = raw_brand.get("name")
+    brand = source_brand or raw_brand or item.get("brandName") or "Без бренда"
     result.append(
         {
             "name": str(title).strip(),
@@ -634,11 +874,16 @@ def append_product(
             "source_currency": source_currency.upper(),
             "images": images,
             "source_url": url,
+            "brand": str(brand).strip(),
+            "category": normalize_category(category_value),
+            "category_name": str(category_value),
         }
     )
 
 
-def parse_products_html(text: str, base_url: str) -> list[dict[str, Any]]:
+def parse_products_html(
+    text: str, base_url: str, source_brand: str | None = None
+) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     soup = BeautifulSoup(text, "html.parser")
     source_currency = "USD"
@@ -665,7 +910,7 @@ def parse_products_html(text: str, base_url: str) -> list[dict[str, Any]]:
         for value in values:
             if isinstance(value, dict) and "@graph" in value:
                 values.extend(value["@graph"])
-            append_product(result, value, base_url, source_currency)
+            append_product(result, value, base_url, source_currency, source_brand)
 
     for script in soup.select("script#__NEXT_DATA__, script[type='application/json']"):
         try:
@@ -678,7 +923,7 @@ def parse_products_html(text: str, base_url: str) -> list[dict[str, Any]]:
                 if any(key in value for key in ("title", "name")) and any(
                     key in value for key in ("price", "variants", "offers")
                 ):
-                    append_product(result, value, base_url, source_currency)
+                    append_product(result, value, base_url, source_currency, source_brand)
                 for nested in value.values():
                     walk(nested)
             elif isinstance(value, list):
@@ -710,9 +955,124 @@ def parse_products_html(text: str, base_url: str) -> list[dict[str, Any]]:
                         image.get("src") if image else None, base_url
                     ),
                     "source_url": href,
+                    "brand": source_brand or "Без бренда",
+                    "category": normalize_category(title),
+                    "category_name": title,
                 }
             )
 
+    unique: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in result:
+        key = item["source_url"] or f"{item['name']}:{item['price_usd']}"
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+    return unique
+
+
+def parse_nike_html(text: str, base_url: str) -> list[dict[str, Any]]:
+    """Parse Nike's Next.js wall catalog embedded in __NEXT_DATA__."""
+    result: list[dict[str, Any]] = []
+    soup = BeautifulSoup(text, "html.parser")
+    script = soup.select_one("script#__NEXT_DATA__")
+    if not script:
+        return result
+    try:
+        payload = json.loads(script.string or script.get_text())
+    except (json.JSONDecodeError, TypeError):
+        return result
+    initial_state = (
+        payload.get("props", {})
+        .get("pageProps", {})
+        .get("initialState", {})
+    )
+    groupings = initial_state.get("Wall", {}).get("productGroupings", [])
+    if not isinstance(groupings, list):
+        return result
+    for grouping in groupings:
+        if not isinstance(grouping, dict):
+            continue
+        for product in grouping.get("products", []):
+            if not isinstance(product, dict):
+                continue
+            copy_data = product.get("copy", {})
+            prices = product.get("prices", {})
+            images = product.get("colorwayImages", {})
+            title = copy_data.get("title") if isinstance(copy_data, dict) else None
+            price = prices.get("currentPrice") if isinstance(prices, dict) else None
+            if not title or price is None:
+                continue
+            code = str(product.get("productCode") or product.get("internalPid") or "")
+            slug = re.sub(r"[^a-z0-9]+", "-", str(title).lower()).strip("-")
+            source_url = urljoin(base_url, f"/t/{slug}/{code}")
+            append_product(
+                result,
+                {
+                    "name": title,
+                    "price": price,
+                    "images": [
+                        images.get("portraitURL"),
+                        images.get("squarishURL"),
+                    ],
+                    "url": source_url,
+                    "productType": product.get("productType"),
+                    "productSubType": (
+                        copy_data.get("subTitle")
+                        if isinstance(copy_data, dict)
+                        else ""
+                    ),
+                },
+                base_url,
+                str(prices.get("currency", "USD")) if isinstance(prices, dict) else "USD",
+                "Nike",
+            )
+    return result
+
+
+def parse_zara_html(text: str, base_url: str) -> list[dict[str, Any]]:
+    """Parse Zara JSON embedded in a page, with a safe HTML fallback.
+
+    Zara sometimes responds with an Akamai interstitial instead of catalog
+    data. In that case this returns an empty list and sync keeps the old
+    catalog rather than deleting it.
+    """
+    result = parse_products_html(text, base_url, "Zara")
+    soup = BeautifulSoup(text, "html.parser")
+    for script in soup.select(
+        "script#__PRELOADED_STATE__, script#__NEXT_DATA__, "
+        "script[type='application/json'], script[type='application/ld+json']"
+    ):
+        try:
+            payload = json.loads(script.string or script.get_text())
+        except (json.JSONDecodeError, TypeError):
+            continue
+
+        def walk(value: Any) -> None:
+            if isinstance(value, dict):
+                if (
+                    any(
+                        key in value
+                        for key in ("name", "title", "productName")
+                    )
+                    and any(
+                        key in value
+                        for key in (
+                            "price",
+                            "priceInCents",
+                            "priceWithDiscount",
+                            "priceInMinorUnits",
+                        )
+                    )
+                ):
+                    append_product(result, value, base_url, "USD", "Zara")
+                for nested in value.values():
+                    walk(nested)
+            elif isinstance(value, list):
+                for nested in value:
+                    walk(nested)
+
+        walk(payload)
     unique: list[dict[str, Any]] = []
     seen: set[str] = set()
     for item in result:
@@ -727,7 +1087,7 @@ def parse_shopify_json(payload: Any, base_url: str) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     values = payload.get("products", []) if isinstance(payload, dict) else []
     for product in values:
-        append_product(result, product, base_url, "USD")
+        append_product(result, product, base_url, "USD", "Supreme")
     return result
 
 
@@ -802,7 +1162,7 @@ async def scrape_supreme() -> tuple[list[dict[str, Any]], float]:
         try:
             async with session.get(SUPREME_URL) as response:
                 homepage = await response.text(errors="ignore")
-            products = parse_products_html(homepage, SUPREME_URL)
+            products = parse_products_html(homepage, SUPREME_URL, "Supreme")
         except Exception:
             log.exception("Supreme homepage request failed")
 
@@ -822,7 +1182,7 @@ async def scrape_supreme() -> tuple[list[dict[str, Any]], float]:
                             products = parse_shopify_json(payload, SUPREME_URL)
                         else:
                             page = await response.text(errors="ignore")
-                            products = parse_products_html(page, endpoint)
+                            products = parse_products_html(page, endpoint, "Supreme")
                     if products:
                         break
                 except Exception:
@@ -840,10 +1200,62 @@ async def scrape_supreme() -> tuple[list[dict[str, Any]], float]:
         return products, usd_to_rub
 
 
+async def scrape_external_source(
+    session: aiohttp.ClientSession,
+    url: str,
+    parser: Any,
+    source_name: str,
+) -> list[dict[str, Any]]:
+    if not url:
+        return []
+    try:
+        async with session.get(url) as response:
+            if response.status >= 400:
+                log.warning("%s catalog returned HTTP %s", source_name, response.status)
+                return []
+            text = await response.text(errors="ignore")
+        products = parser(text, url)
+        log.info("%s parser found %s products", source_name, len(products))
+        return products
+    except Exception:
+        log.exception("%s catalog request failed", source_name)
+        return []
+
+
+async def scrape_catalog() -> tuple[list[dict[str, Any]], float]:
+    """Load all configured brands while keeping each source independent."""
+    supreme_products, rate = await scrape_supreme()
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "Chrome/124 Safari/537.36"
+        ),
+        "Accept-Language": "en-US,en;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8",
+    }
+    timeout = aiohttp.ClientTimeout(total=60)
+    async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
+        nike_products, zara_products = await asyncio.gather(
+            scrape_external_source(session, NIKE_URL, parse_nike_html, "Nike"),
+            scrape_external_source(session, ZARA_URL, parse_zara_html, "Zara"),
+        )
+    all_products = supreme_products + nike_products + zara_products
+    for product in all_products:
+        product.setdefault("brand", "Без бренда")
+        product["category"] = product_category(product)
+    log.info(
+        "Combined catalog: Supreme=%s, Nike=%s, Zara=%s",
+        len(supreme_products),
+        len(nike_products),
+        len(zara_products),
+    )
+    return all_products, rate
+
+
 async def sync_products() -> int:
-    products, rate = await scrape_supreme()
+    products, rate = await scrape_catalog()
     if not products:
-        log.warning("Supreme returned no products; existing catalog was preserved")
+        log.warning("All sources returned no products; existing catalog was preserved")
         return 0
 
     current_settings = settings()
@@ -890,6 +1302,9 @@ async def sync_products() -> int:
                 "images": image_names,
                 "source_image": (raw.get("images") or [None])[0],
                 "source_url": raw.get("source_url", ""),
+                "brand": raw.get("brand", "Без бренда"),
+                "category": raw.get("category", normalize_category(raw.get("name"))),
+                "category_name": raw.get("category_name", ""),
                 "updated_at": now_iso(),
             }
             write_json(folder / "price.json", data)
@@ -975,7 +1390,10 @@ async def command_help(message: Message) -> None:
 async def command_products(message: Message) -> None:
     if await deny_if_unavailable(message):
         return
-    await show_products(message.bot, message.chat.id)
+    await message.answer(
+        "Выберите фильтр каталога или откройте все товары:",
+        reply_markup=catalog_filter_keyboard(),
+    )
 
 
 @dp.callback_query(F.data == "budget_start")
@@ -1012,12 +1430,20 @@ async def products_page(callback: CallbackQuery) -> None:
     if is_blocked(callback.from_user.id):
         await callback.answer("Ваш аккаунт заблокирован", show_alert=True)
         return
-    offset = callback.data.split(":", 1)[1]
-    if not offset.isdigit():
+    parts = callback.data.split(":")
+    if len(parts) != 4 or not parts[3].isdigit():
         await callback.answer("Некорректная страница", show_alert=True)
         return
     await callback.answer()
-    await show_products(callback.bot, callback.message.chat.id, int(offset))
+    category = None if parts[1] == "all" else parts[1]
+    brand = None if parts[2] == "all" else brand_by_key(load_products(), parts[2])
+    await show_products(
+        callback.bot,
+        callback.message.chat.id,
+        int(parts[3]),
+        category=category,
+        brand=brand,
+    )
 
 
 @dp.callback_query(F.data.startswith("budget_page:"))
@@ -1025,16 +1451,20 @@ async def budget_page(callback: CallbackQuery) -> None:
     if is_blocked(callback.from_user.id):
         await callback.answer("Ваш аккаунт заблокирован", show_alert=True)
         return
-    _, budget, offset = callback.data.split(":")
-    if not budget.isdigit() or not offset.isdigit():
+    parts = callback.data.split(":")
+    if len(parts) != 5 or not parts[1].isdigit() or not parts[4].isdigit():
         await callback.answer("Некорректная страница", show_alert=True)
         return
     await callback.answer()
+    category = None if parts[2] == "all" else parts[2]
+    brand = None if parts[3] == "all" else brand_by_key(load_products(), parts[3])
     await show_products(
         callback.bot,
         callback.message.chat.id,
-        int(offset),
-        int(budget),
+        int(parts[4]),
+        int(parts[1]),
+        category=category,
+        brand=brand,
     )
 
 
@@ -1073,7 +1503,83 @@ async def callback_products(callback: CallbackQuery) -> None:
     if not settings().get("store_open", True):
         await callback.message.answer(STORE_CLOSED_MESSAGE)
         return
+    await callback.message.answer(
+        "Выберите фильтр каталога или откройте все товары:",
+        reply_markup=catalog_filter_keyboard(),
+    )
+
+
+@dp.callback_query(F.data == "catalog_filters")
+async def callback_catalog_filters(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if is_blocked(callback.from_user.id):
+        await callback.message.answer("Ваш аккаунт заблокирован.")
+        return
+    await callback.message.answer(
+        "Выберите фильтр каталога или откройте все товары:",
+        reply_markup=catalog_filter_keyboard(),
+    )
+
+
+@dp.callback_query(F.data == "catalog_categories")
+async def callback_catalog_categories(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if is_blocked(callback.from_user.id):
+        await callback.message.answer("Ваш аккаунт заблокирован.")
+        return
+    await callback.message.answer("Выберите категорию:", reply_markup=category_keyboard())
+
+
+@dp.callback_query(F.data == "catalog_brands")
+async def callback_catalog_brands(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if is_blocked(callback.from_user.id):
+        await callback.message.answer("Ваш аккаунт заблокирован.")
+        return
+    await callback.message.answer("Выберите бренд:", reply_markup=brand_keyboard())
+
+
+@dp.callback_query(F.data == "catalog_all")
+async def callback_catalog_all(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if is_blocked(callback.from_user.id):
+        await callback.message.answer("Ваш аккаунт заблокирован.")
+        return
     await show_products(callback.bot, callback.message.chat.id)
+
+
+@dp.callback_query(F.data.startswith("catalog_category:"))
+async def callback_catalog_category(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if is_blocked(callback.from_user.id):
+        await callback.message.answer("Ваш аккаунт заблокирован.")
+        return
+    category = callback.data.split(":", 1)[1]
+    if category not in CATEGORY_LABELS:
+        await callback.message.answer("Категория не найдена.")
+        return
+    await show_products(
+        callback.bot,
+        callback.message.chat.id,
+        category=category,
+    )
+
+
+@dp.callback_query(F.data.startswith("catalog_brand:"))
+async def callback_catalog_brand(callback: CallbackQuery) -> None:
+    await callback.answer()
+    if is_blocked(callback.from_user.id):
+        await callback.message.answer("Ваш аккаунт заблокирован.")
+        return
+    brand = brand_by_key(load_products(), callback.data.split(":", 1)[1])
+    if not brand:
+        await callback.message.answer("Бренд не найден.")
+        return
+    await show_products(
+        callback.bot,
+        callback.message.chat.id,
+        brand=brand,
+    )
 
 
 @dp.callback_query(F.data == "show_cart")
@@ -1788,7 +2294,7 @@ async def main() -> None:
     log.info("Ensured ./data/users, ./data/orders and ./data/products")
     try:
         count = await sync_products_with_session()
-        log.info("Initial Supreme sync: %s products", count)
+        log.info("Initial combined catalog sync: %s products", count)
     except Exception:
         log.exception("Initial catalog sync failed; bot will start with existing files")
     bot = Bot(

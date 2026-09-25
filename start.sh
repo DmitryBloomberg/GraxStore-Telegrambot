@@ -39,6 +39,8 @@ cat > "$ENV_FILE" <<EOF
 BOT_TOKEN=$BOT_TOKEN
 ADMIN_IDS=$ADMIN_IDS
 SUPREME_URL=${SUPREME_URL:-https://supreme.com/}
+NIKE_URL=${NIKE_URL:-https://www.nike.com/w/mens-lifestyle-shoes-13jrmznik1zy7ok}
+ZARA_URL=${ZARA_URL:-https://www.zara.com/us/en/man-new-in-l711.html?v1=2732942}
 PAYMENT_BANK_NAME=${PAYMENT_BANK_NAME:-}
 PAYMENT_CARD_NUMBER=${PAYMENT_CARD_NUMBER:-}
 PAYMENT_RECIPIENT=${PAYMENT_RECIPIENT:-}
@@ -65,4 +67,16 @@ fi
   "beautifulsoup4>=4.12" \
   "Pillow>=10.0"
 
-exec .venv/bin/python bot.py
+RESTART_DELAY="${RESTART_DELAY:-5}"
+echo "Бот запущен. При аварийном завершении перезапуск через ${RESTART_DELAY} сек."
+
+trap 'echo "Остановка бота."; exit 0' INT TERM
+while true; do
+  set +e
+  .venv/bin/python bot.py
+  EXIT_CODE=$?
+  set -e
+  echo "Процесс бота завершился с кодом ${EXIT_CODE}."
+  echo "Перезапуск через ${RESTART_DELAY} сек. (Ctrl+C — остановить)."
+  sleep "$RESTART_DELAY"
+done

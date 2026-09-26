@@ -921,7 +921,15 @@ def parse_products_html(
         def walk(value: Any) -> None:
             if isinstance(value, dict):
                 if any(key in value for key in ("title", "name")) and any(
-                    key in value for key in ("price", "variants", "offers")
+                    key in value
+                    for key in (
+                        "price",
+                        "priceInCents",
+                        "priceInMinorUnits",
+                        "priceWithDiscount",
+                        "variants",
+                        "offers",
+                    )
                 ):
                     append_product(result, value, base_url, source_currency, source_brand)
                 for nested in value.values():
@@ -932,27 +940,76 @@ def parse_products_html(
 
         walk(payload)
 
-    # Last-resort extraction for catalog cards in ordinary HTML.
-    for link in soup.select("a[href*='/products/']"):
+    # Last-resort extraction for catalog cards in ordinary HTML. Zara uses
+    # URLs like /some-product-p03692902.html rather than /products/.
+    product_link_pattern = re.compile(
+        r"(?:-p|/p)\d{6,}(?:\.html)?", re.IGNORECASE
+    )
+    for link in soup.select("a[href]"):
+        raw_href = str(link.get("href", ""))
+        if not product_link_pattern.search(raw_href):
+            continue
         href = urljoin(base_url, link.get("href", ""))
-        title_node = link.select_one("[class*='title'], [class*='name']")
+        card = link
+        for parent in link.parents:
+            classes = " ".join(parent.get("class", []))
+            if parent.name in {"li", "article"} or re.search(
+                r"product|item|grid", classes, re.IGNORECASE
+            ):
+                card = parent
+                break
+        card_text = card.get_text(" ", strip=True)
+        title_node = card.select_one(
+            "[class*='product-name'], [class*='product-title'], "
+            "[class*='title'], [class*='name'], h2, h3, h4"
+        )
         title = (
             link.get("aria-label")
             or link.get("title")
             or (title_node.get_text(" ", strip=True) if title_node else "")
-            or link.get_text(" ", strip=True)
+            or card_text
         )
-        price_match = re.search(r"\$\s*([0-9]+(?:[.,][0-9]{1,2})?)", link.get_text(" ", strip=True))
-        image = link.select_one("img")
+        price_match = re.search(
+            r"(?P<symbol>[$€£])\s*(?P<amount>[0-9]+(?:[.,][0-9]{1,2})?)"
+            r"|(?P<amount_after>[0-9]+(?:[.,][0-9]{1,2})?)\s*"
+            r"(?P<currency>USD|EUR|GBP)",
+            card_text,
+            re.IGNORECASE,
+        )
+        image = card.select_one("img")
+        if image:
+            image_url = (
+                image.get("src")
+                or image.get("data-src")
+                or image.get("data-original")
+            )
+        else:
+            image_url = None
+        if title:
+            title = re.sub(
+                r"\s*(?:[$€£]\s*[0-9][0-9.,]*|[0-9][0-9.,]*\s*(?:USD|EUR|GBP)).*$",
+                "",
+                str(title),
+                flags=re.IGNORECASE,
+            ).strip(" -*|")
+        if not title or not price_match:
+            continue
+        amount = price_match.group("amount") or price_match.group("amount_after")
+        currency = price_match.group("currency")
+        if not currency:
+            currency = {"$": "USD", "€": "EUR", "£": "GBP"}.get(
+                price_match.group("symbol"),
+                source_currency,
+            )
         if title and price_match:
             result.append(
                 {
                     "name": title.strip(),
-                    "price_usd": parse_price(price_match.group(1)),
-                    "price_source": parse_price(price_match.group(1)),
-                    "source_currency": source_currency,
+                    "price_usd": parse_price(amount),
+                    "price_source": parse_price(amount),
+                    "source_currency": currency.upper(),
                     "images": normalize_images(
-                        image.get("src") if image else None, base_url
+                        image_url, base_url
                     ),
                     "source_url": href,
                     "brand": source_brand or "Без бренда",
@@ -1073,6 +1130,86 @@ def parse_zara_html(text: str, base_url: str) -> list[dict[str, Any]]:
                     walk(nested)
 
         walk(payload)
+    unique: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for item in result:
+        key = item["source_url"] or f"{item['name']}:{item['price_usd']}"
+        if key not in seen:
+            seen.add(key)
+            unique.append(item)
+    return unique
+
+
+def parse_zara_markdown(text: str, base_url: str) -> list[dict[str, Any]]:
+    """Parse the rendered Zara catalog returned by a text reader fallback.
+
+    Zara serves an Akamai interstitial to some datacenter IPs while the same
+    public page is still available as server-rendered content. The reader
+    fallback keeps the original product URL and image URL, then feeds the
+    records through the same price/category normalization as every source.
+    """
+    product_url_pattern = re.compile(
+        r"https?://(?:www\.)?zara\.com/[^)\s]+?-p\d{6,}\.html(?:\?[^)\s]*)?",
+        re.IGNORECASE,
+    )
+    price_pattern = re.compile(
+        r"(?P<symbol>[$€£])\s*(?P<amount>[0-9]+(?:[.,][0-9]{1,2})?)"
+        r"|(?P<amount_after>[0-9]+(?:[.,][0-9]{1,2})?)\s*"
+        r"(?P<currency>USD|EUR|GBP)",
+        re.IGNORECASE,
+    )
+    images_by_url: dict[str, str] = {}
+    for line in text.splitlines():
+        product_match = product_url_pattern.search(line)
+        if not product_match:
+            continue
+        product_url = product_match.group(0)
+        image_match = re.search(r"!\[[^\]]*\]\((https?://[^)]+)\)", line)
+        if image_match:
+            images_by_url[product_url] = image_match.group(1).split("?")[0]
+
+    result: list[dict[str, Any]] = []
+    for line in text.splitlines():
+        product_match = product_url_pattern.search(line)
+        price_match = price_pattern.search(line)
+        if not product_match or not price_match:
+            continue
+        product_url = product_match.group(0)
+        title_match = re.search(
+            r"###\s*\[([^\]]+)\]\(",
+            line,
+        )
+        if not title_match:
+            title_match = re.search(
+                r"\[([^\]]+)\]\(" + re.escape(product_url),
+                line,
+            )
+        if not title_match:
+            continue
+        title = re.sub(r"\s+", " ", title_match.group(1)).strip()
+        if not title or title.lower().startswith(("image ", "video ")):
+            continue
+        amount = price_match.group("amount") or price_match.group("amount_after")
+        currency = price_match.group("currency")
+        if not currency:
+            currency = {"$": "USD", "€": "EUR", "£": "GBP"}.get(
+                price_match.group("symbol"),
+                "USD",
+            )
+        append_product(
+            result,
+            {
+                "name": title,
+                "price": amount,
+                "images": [images_by_url.get(product_url)],
+                "url": product_url,
+                "category": title,
+            },
+            base_url,
+            currency,
+            "Zara",
+        )
+
     unique: list[dict[str, Any]] = []
     seen: set[str] = set()
     for item in result:
@@ -1222,6 +1359,32 @@ async def scrape_external_source(
         return []
 
 
+async def scrape_zara_source(
+    session: aiohttp.ClientSession, url: str
+) -> list[dict[str, Any]]:
+    """Load Zara directly, then retry through rendered public content."""
+    direct = await scrape_external_source(session, url, parse_zara_html, "Zara")
+    if direct:
+        return direct
+
+    reader_url = f"https://r.jina.ai/http://{url.removeprefix('https://').removeprefix('http://')}"
+    try:
+        async with session.get(
+            reader_url,
+            headers={"Accept": "text/plain,text/markdown;q=0.9,*/*;q=0.5"},
+        ) as response:
+            if response.status >= 400:
+                log.warning("Zara rendered fallback returned HTTP %s", response.status)
+                return []
+            rendered = await response.text(errors="ignore")
+        products = parse_zara_markdown(rendered, url)
+        log.info("Zara rendered fallback found %s products", len(products))
+        return products
+    except Exception:
+        log.exception("Zara rendered fallback failed")
+        return []
+
+
 async def scrape_catalog() -> tuple[list[dict[str, Any]], float]:
     """Load all configured brands while keeping each source independent."""
     supreme_products, rate = await scrape_supreme()
@@ -1237,7 +1400,7 @@ async def scrape_catalog() -> tuple[list[dict[str, Any]], float]:
     async with aiohttp.ClientSession(headers=headers, timeout=timeout) as session:
         nike_products, zara_products = await asyncio.gather(
             scrape_external_source(session, NIKE_URL, parse_nike_html, "Nike"),
-            scrape_external_source(session, ZARA_URL, parse_zara_html, "Zara"),
+            scrape_zara_source(session, ZARA_URL),
         )
     all_products = supreme_products + nike_products + zara_products
     for product in all_products:

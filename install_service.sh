@@ -41,12 +41,16 @@ Type=simple
 User=${RUN_USER}
 Group=${RUN_GROUP}
 WorkingDirectory=${PROJECT_DIR}
-ExecStart=/usr/bin/env bash ${PROJECT_DIR}/start.sh
+ExecStart=${PROJECT_DIR}/.venv/bin/python ${PROJECT_DIR}/bot.py
 Restart=always
 RestartSec=10
 KillSignal=SIGTERM
 TimeoutStopSec=30
 Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+UMask=0077
+StandardOutput=journal
+StandardError=journal
 
 [Install]
 WantedBy=multi-user.target

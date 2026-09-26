@@ -1490,6 +1490,7 @@ async def sync_products() -> int:
 # A session is created only during sync and closed at the end.  Keeping this
 # tiny holder avoids opening a new TCP session for every image.
 session_for_sync: aiohttp.ClientSession
+catalog_sync_lock = asyncio.Lock()
 
 
 async def sync_products_with_session() -> int:
@@ -1498,6 +1499,31 @@ async def sync_products_with_session() -> int:
     async with aiohttp.ClientSession(headers=headers) as session:
         session_for_sync = session
         return await sync_products()
+
+
+async def sync_catalog_safely() -> int:
+    """Run one catalog refresh without overlapping an admin refresh."""
+    async with catalog_sync_lock:
+        return await sync_products_with_session()
+
+
+async def periodic_catalog_refresh() -> None:
+    """Refresh products in the background while the Telegram bot is running."""
+    try:
+        interval_hours = float(os.getenv("CATALOG_REFRESH_HOURS", "6"))
+    except ValueError:
+        interval_hours = 6.0
+    interval_seconds = max(900, interval_hours * 3600)
+    log.info("Automatic catalog refresh interval: %.1f hours", interval_seconds / 3600)
+    while True:
+        await asyncio.sleep(interval_seconds)
+        try:
+            count = await sync_catalog_safely()
+            log.info("Scheduled catalog sync completed: %s products", count)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception("Scheduled catalog sync failed; existing catalog preserved")
 
 
 class AdminStates(StatesGroup):
@@ -2293,11 +2319,11 @@ async def admin_refresh(callback: CallbackQuery) -> None:
         return
     await callback.answer("Переустановка позиций запущена")
     await callback.message.answer(
-        "Удаляю старые позиции и заново загружаю каталог Supreme. "
+        "Удаляю старые позиции и заново загружаю каталоги Supreme, Nike и Zara. "
         "Это может занять несколько минут…"
     )
     try:
-        count = await sync_products_with_session()
+        count = await sync_catalog_safely()
         await callback.message.answer(f"Позиции переустановлены: {count} шт.")
     except Exception:
         log.exception("Manual product sync failed")
@@ -2456,7 +2482,7 @@ async def main() -> None:
     write_json(SETTINGS_PATH, settings())
     log.info("Ensured ./data/users, ./data/orders and ./data/products")
     try:
-        count = await sync_products_with_session()
+        count = await sync_catalog_safely()
         log.info("Initial combined catalog sync: %s products", count)
     except Exception:
         log.exception("Initial catalog sync failed; bot will start with existing files")
@@ -2465,7 +2491,13 @@ async def main() -> None:
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
     log.info("Bot started. Admin IDs: %s", sorted(ADMIN_IDS))
-    await dp.start_polling(bot)
+    refresh_task = asyncio.create_task(periodic_catalog_refresh())
+    try:
+        await dp.start_polling(bot)
+    finally:
+        refresh_task.cancel()
+        await asyncio.gather(refresh_task, return_exceptions=True)
+        await bot.session.close()
 
 
 if __name__ == "__main__":
